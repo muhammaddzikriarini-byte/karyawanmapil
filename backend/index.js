@@ -1,93 +1,187 @@
-const express = require('express');
-const cors = require('cors');
-const sqlite3 = require('sqlite3').verbose();
+const express = require("express");
+const cors = require("cors");
+const sqlite3 = require("sqlite3").verbose();
 
 const app = express();
 const PORT = 5000;
 
-// Middleware (Izin akses & parsing JSON)
+// Middleware
 app.use(cors());
 app.use(express.json());
+app.use("/uploads", express.static("uploads"));
 
-// Inisialisasi Database SQLite
-const db = new sqlite3.Database('./database.db', (err) => {
-    if (err) console.error('Gagal terhubung ke database:', err.message);
-    else console.log('Database SQLite berhasil dibuat/terhubung!');
+// Inisialisasi Database
+const db = new sqlite3.Database("./database.db", (err) => {
+    if (err) console.error("Gagal terhubung ke database:", err.message);
+    else console.log("Database SQLite siap digunakan!");
 });
 
-// Buat Tabel Otomatis Jika Belum Ada
+// Buat Tabel otomatis jika belum ada
 db.serialize(() => {
+    // Tabel Kontak (Pesan)
     db.run(`
     CREATE TABLE IF NOT EXISTS contacts (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      nama TEXT,
-      email TEXT,
-      pesan TEXT,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-    )
-  `);
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        nama TEXT,
+        email TEXT,
+        pesan TEXT,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )`);
 
+    // Tabel Galeri Gambar (Lengkap: kategori, judul, subjudul, deskripsi, image_url)
     db.run(`
     CREATE TABLE IF NOT EXISTS galleries (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      judul TEXT,
-      image_url TEXT
-    )
-  `);
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        kategori TEXT,
+        judul TEXT,
+        subjudul TEXT,
+        deskripsi TEXT,
+        image_url TEXT
+    )`);
 });
 
-// === ENDPOINT FORM KONTAK ===
+// ==========================================
+// 1. API KONTAK (GET & POST)
+// ==========================================
 
-// 1. Ambil Semua Pesan Masuk
-app.get('/api/contact', (req, res) => {
-    db.all('SELECT * FROM contacts ORDER BY id DESC', [], (err, rows) => {
-        if (err) return res.status(500).json({ error: err.message });
-        res.json(rows);
+// [GET] Ambil semua data pesan kontak
+app.get("/api/contact", (req, res) => {
+    const sql = "SELECT * FROM contacts ORDER BY id DESC";
+    db.all(sql, [], (err, rows) => {
+        if (err) {
+            return res.status(500).json({ status: "error", message: err.message });
+        }
+        res.json({ status: "success", data: rows });
     });
 });
 
-// 2. Kirim Pesan Baru
-app.post('/api/contact', (req, res) => {
+// [POST] Simpan pesan baru dari form kontak
+app.post("/api/contact", (req, res) => {
     const { nama, email, pesan } = req.body;
+
     if (!nama || !email || !pesan) {
-        return res.status(400).json({ error: 'Semua kolom wajib diisi!' });
+        return res.status(400).json({
+            status: "failed",
+            message: "Semua kolom (nama, email, pesan) wajib diisi!",
+        });
     }
 
-    db.run(
-        'INSERT INTO contacts (nama, email, pesan) VALUES (?, ?, ?)',
-        [nama, email, pesan],
-        function (err) {
-            if (err) return res.status(500).json({ error: err.message });
-            res.json({ message: 'Pesan berhasil disimpan!', id: this.lastID });
+    const sql = "INSERT INTO contacts (nama, email, pesan) VALUES (?, ?, ?)";
+    db.run(sql, [nama, email, pesan], function (err) {
+        if (err) {
+            return res.status(500).json({ status: "error", message: err.message });
         }
-    );
-});
-
-// === ENDPOINT GALERI ===
-
-// 3. Ambil Semua Foto Galeri
-app.get('/api/gallery', (req, res) => {
-    db.all('SELECT * FROM galleries ORDER BY id DESC', [], (err, rows) => {
-        if (err) return res.status(500).json({ error: err.message });
-        res.json(rows);
+        res.status(201).json({
+            status: "success",
+            message: "Pesan berhasil dikirim!",
+            data: { id: this.lastID, nama, email, pesan },
+        });
     });
 });
 
-// 4. Tambah Foto Baru ke Galeri
-app.post('/api/gallery', (req, res) => {
-    const { judul, image_url } = req.body;
-    if (!judul || !image_url) {
-        return res.status(400).json({ error: 'Judul dan URL Gambar wajib diisi!' });
+// ==========================================
+// 2. API GAMBAR / GALERI (GET & POST)
+// ==========================================
+
+// [GET] Ambil daftar gambar (Bisa difilter via Query Parameter, misal: ?kategori=RPL)
+app.get("/api/gallery", (req, res) => {
+    const { kategori, subjudul } = req.query;
+
+    let sql = "SELECT * FROM galleries";
+    let params = [];
+    let conditions = [];
+
+    if (kategori) {
+        conditions.push("kategori = ?");
+        params.push(kategori);
     }
 
-    db.run(
-        'INSERT INTO galleries (judul, image_url) VALUES (?, ?)',
-        [judul, image_url],
-        function (err) {
-            if (err) return res.status(500).json({ error: err.message });
-            res.json({ message: 'Foto berhasil ditambahkan!', id: this.lastID });
+    if (subjudul) {
+        conditions.push("subjudul = ?");
+        params.push(subjudul);
+    }
+
+    if (conditions.length > 0) {
+        sql += " WHERE " + conditions.join(" AND ");
+    }
+
+    sql += " ORDER BY id ASC";
+
+    db.all(sql, params, (err, rows) => {
+        if (err) {
+            return res.status(500).json({ status: "error", message: err.message });
         }
-    );
+        res.json({ status: "success", data: rows });
+    });
+});
+
+// [POST] Tambah data gambar (Support 1 data atau Banyak data sekaligus)
+app.post("/api/gallery", (req, res) => {
+    const data = req.body;
+
+    // A. Jika data yang dikirim berupa Array (Banyak data sekaligus)
+    if (Array.isArray(data)) {
+        if (data.length === 0) {
+            return res.status(400).json({
+                status: "failed",
+                message: "Data array tidak boleh kosong!",
+            });
+        }
+
+        const placeholders = data.map(() => "(?, ?, ?, ?, ?)").join(", ");
+        const sql = `INSERT INTO galleries (kategori, judul, subjudul, deskripsi, image_url) VALUES ${placeholders}`;
+        
+        const values = [];
+        data.forEach((item) => {
+            values.push(
+                item.kategori || "",
+                item.judul || "", 
+                item.subjudul || "", 
+                item.deskripsi || "", 
+                item.image_url || ""
+            );
+        });
+
+        db.run(sql, values, function (err) {
+            if (err) {
+                return res.status(500).json({ status: "error", message: err.message });
+            }
+            res.status(201).json({
+                status: "success",
+                message: `${this.changes} data gambar berhasil ditambahkan sekaligus!`,
+            });
+        });
+    } 
+    // B. Jika data yang dikirim cuma 1 Object
+    else {
+        const { kategori, judul, subjudul, deskripsi, image_url } = data;
+
+        if (!judul) {
+            return res.status(400).json({
+                status: "failed",
+                message: "Judul/Nama wajib diisi!",
+            });
+        }
+
+        const sql = "INSERT INTO galleries (kategori, judul, subjudul, deskripsi, image_url) VALUES (?, ?, ?, ?, ?)";
+        db.run(sql, [kategori || "", judul, subjudul || "", deskripsi || "", image_url || ""], function (err) {
+            if (err) {
+                return res.status(500).json({ status: "error", message: err.message });
+            }
+            res.status(201).json({
+                status: "success",
+                message: "Gambar berhasil ditambahkan ke galeri!",
+                data: { 
+                    id: this.lastID, 
+                    kategori: kategori || "",
+                    judul, 
+                    subjudul: subjudul || "", 
+                    deskripsi: deskripsi || "", 
+                    image_url: image_url || ""
+                },
+            });
+        });
+    }
 });
 
 // Jalankan Server
